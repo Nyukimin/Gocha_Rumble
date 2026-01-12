@@ -1,0 +1,25 @@
+# Cursor Rules for Gocha Rumble 3D
+
+# ============================================
+# 共通ルールの参照（必須）
+# ============================================
+@rules/common/GLOBAL_AGENT.md
+@rules/common/rules_architecture.md
+@rules/common/rules_backend.md
+@rules/common/rules_frontend.md
+@rules/common/rules_logging.md
+@rules/common/rules_security.md
+@rules/common/rules_testing.md
+
+# ============================================
+# プロジェクト固有ルールの参照
+# ============================================
+@rules/PROJECT_AGENT.md
+@rules/rules_domain.md
+@[rules/rules_domain.md]
+@[rules/PROJECT_AGENT.md]
+
+# ============================================
+# 以下、プロジェクト固有の追加ルール
+# ============================================
+# (PROJECT_AGENT.md に記載)
