@@ -2,6 +2,7 @@ import { useGLTF } from '@react-three/drei'
 import { useMemo, useLayoutEffect, useRef, useEffect } from 'react'
 import * as THREE from 'three'
 import { useFrame, useThree } from '@react-three/fiber'
+import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js'
 
 // -----------------------------------------------------------------------------
 // 定数・パラメータ定義
@@ -57,12 +58,15 @@ const UNIT_TYPES = {
     scale: 0.4,
     speed: 1.0,
     color: '#ffdd00', // 黄
-    // ちびキャラ風
+    // ちびキャラ風: 頭大きく、手足小さく
     boneScales: {
-      'Head': [1.8, 1.8, 1.8],
-      'Torso': [1.2, 0.8, 1.2],
-      'Arm': [0.7, 0.7, 0.7],
-      'Leg': [0.5, 0.5, 0.5],
+      'Head': [2.2, 2.2, 2.2],          // 頭を大きく
+      'Torso': [0.9, 0.6, 0.9],         // 胴体を小さく
+      'Shoulder': [0.6, 0.6, 0.6],      // 肩を小さく
+      'UpperArm': [0.5, 0.5, 0.5],      // 腕を細く
+      'LowerArm': [0.5, 0.5, 0.5],
+      'UpperLeg': [0.4, 0.4, 0.4],      // 脚を細く
+      'LowerLeg': [0.4, 0.4, 0.4],
     } as BoneScales,
     boids: { seperation: 4.0, alignment: 0.5, cohesion: 0.5, maxSpeed: 0.6, maxForce: 0.08, perceptionRadius: 20 }
   }
@@ -134,6 +138,10 @@ const bakeSkinnedMesh = (skinnedMesh: THREE.SkinnedMesh, boneScales: BoneScales)
   
   // 行列更新
   skeleton.update()
+  // ボーンのmatrixWorldを更新（これが重要！）
+  skeleton.bones.forEach(bone => {
+    bone.updateMatrixWorld(true)
+  })
 
   const geometry = skinnedMesh.geometry.clone()
   const positionAttribute = geometry.attributes.position
@@ -236,91 +244,82 @@ export const Army = ({ count = 1000 }: { count: number }) => {
     camera.lookAt(0, 0, 0)
   }, [camera])
 
-  // 1. タイプごとのメッシュデータを生成（ここで頭身変更を焼き込む）
+  // 1. タイプごとの統合ジオメトリを生成（パーツを1つにマージ）
   // ---------------------------------------------------------------------------
-  const bakedDataMap = useMemo(() => {
+  const mergedGeometryMap = useMemo(() => {
     // シーンの行列を更新しておく
     scene.updateMatrixWorld(true)
     
-    const dataMap: { [key: string]: { geometry: THREE.BufferGeometry; material: THREE.Material; key: string }[] } = {}
+    // デバッグ: ボーン名を出力
+    let boneNamesLogged = false
+    scene.traverse((obj: any) => {
+      if (!boneNamesLogged && obj.isSkinnedMesh && obj.skeleton) {
+        const boneNames = obj.skeleton.bones.map((b: any) => b.name)
+        console.log('[DEBUG] All bone names:', boneNames.join(', '))
+        boneNamesLogged = true
+      }
+    })
+    
+    const geometryMap: { [key: string]: THREE.BufferGeometry } = {}
 
     // 各ユニットタイプごとに生成
     Object.keys(UNIT_TYPES).forEach(typeKey => {
       const typeConfig = UNIT_TYPES[typeKey as keyof typeof UNIT_TYPES]
       const boneScales = typeConfig.boneScales
-      const list: { geometry: THREE.BufferGeometry; material: THREE.Material; key: string }[] = []
+      const geometries: THREE.BufferGeometry[] = []
 
-      // 注意: オリジナルのシーン構造を使って計算する（クローンはしない）
-      // bakeSkinnedMesh 内部で一時的に変形させて、計算後に戻すアプローチをとる
-      
       scene.traverse((obj: any) => {
         if (obj.isSkinnedMesh) {
-          // SkinnedMeshの場合はCPUスキニングで変形を焼き込む
           const geometry = bakeSkinnedMesh(obj, boneScales)
-          
-          const material = obj.material.clone()
-          material.skinning = false
-          material.morphTargets = false
-          
-          list.push({ geometry, material, key: obj.uuid })
+          // マージ用に属性を正規化
+          if (geometry.attributes.uv) geometry.deleteAttribute('uv')
+          if (geometry.attributes.uv1) geometry.deleteAttribute('uv1')
+          if (geometry.attributes.uv2) geometry.deleteAttribute('uv2')
+          // morphTargetsRelativeを統一
+          geometry.morphTargetsRelative = false
+          if (geometry.morphAttributes) geometry.morphAttributes = {}
+          geometries.push(geometry)
 
         } else if (obj.isMesh) {
-          // 通常Meshの場合は単純なMatrixWorld焼き込み
           const geometry = obj.geometry.clone()
           geometry.applyMatrix4(obj.matrixWorld)
           geometry.computeVertexNormals()
-          
           if (geometry.attributes.color) geometry.deleteAttribute('color')
-          
-          const material = obj.material.clone()
-          list.push({ geometry, material, key: obj.uuid })
+          if (geometry.attributes.uv) geometry.deleteAttribute('uv')
+          if (geometry.attributes.uv1) geometry.deleteAttribute('uv1')
+          if (geometry.attributes.uv2) geometry.deleteAttribute('uv2')
+          // morphTargetsRelativeを統一
+          geometry.morphTargetsRelative = false
+          if (geometry.morphAttributes) geometry.morphAttributes = {}
+          geometries.push(geometry)
         }
       })
-      dataMap[typeKey] = list
+      
+      // ジオメトリを統合
+      if (geometries.length > 0) {
+        const merged = BufferGeometryUtils.mergeGeometries(geometries, false)
+        if (merged) {
+          geometryMap[typeKey] = merged
+          const triangleCount = merged.index ? merged.index.count / 3 : merged.attributes.position.count / 3
+          console.log(`[Merged ${typeKey}] ${geometries.length} parts merged, ${triangleCount} triangles per unit`)
+        }
+      }
     })
     
-    return dataMap
+    return geometryMap
   }, [scene])
 
-  // 2. シェーダーアニメーションの準備
+  // 2. タイプ別のマテリアルを作成
   // ---------------------------------------------------------------------------
-  const customMaterialsMap = useMemo(() => {
-    const typeMatMap: { [typeKey: string]: Map<string, THREE.Material> } = {}
-    
-    Object.keys(bakedDataMap).forEach(typeKey => {
-        const meshList = bakedDataMap[typeKey]
-        const map = new Map<string, THREE.Material>()
-        
-        meshList.forEach(({ material, key }) => {
-            const mat = material.clone()
-            mat.onBeforeCompile = (shader) => {
-                shader.uniforms.uTime = { value: 0 }
-                mat.userData.shader = shader
-                shader.vertexShader = `uniform float uTime;\n` + shader.vertexShader
-                shader.vertexShader = shader.vertexShader.replace(
-                '#include <begin_vertex>',
-                `
-                    #include <begin_vertex>
-                    float isLeg = 1.0 - smoothstep(0.5, 2.0, transformed.y);
-                    float legSide = sign(transformed.x);
-                    #ifdef USE_INSTANCING
-                    float rnd = instanceMatrix[3][0] * 0.1 + instanceMatrix[3][2] * 0.1;
-                    #else
-                    float rnd = 0.0;
-                    #endif
-                    float speed = 10.0;
-                    float walkSignal = sin(uTime * speed + rnd + legSide * 3.14);
-                    transformed.z += walkSignal * 0.5 * isLeg;
-                    transformed.y += abs(sin(uTime * speed + rnd)) * 0.2 * isLeg;
-                `
-                )
-            }
-            map.set(key, mat)
-        })
-        typeMatMap[typeKey] = map
+  const typeMaterials = useMemo(() => {
+    const materials: { [key: string]: THREE.MeshBasicMaterial } = {}
+    Object.keys(UNIT_TYPES).forEach(typeKey => {
+      const typeColor = UNIT_TYPES[typeKey as keyof typeof UNIT_TYPES].color
+      materials[typeKey] = new THREE.MeshBasicMaterial({ color: typeColor })
+      console.log(`[Material] Created ${typeKey} material with color: ${typeColor}`)
     })
-    return typeMatMap
-  }, [bakedDataMap])
+    return materials
+  }, [])
 
   // 3. パーティクル（Boidsユニット）の初期化
   // ---------------------------------------------------------------------------
@@ -356,11 +355,12 @@ export const Army = ({ count = 1000 }: { count: number }) => {
         acceleration: new THREE.Vector3(),
         rotationY: Math.random() * Math.PI * 2,
         scale: type.scale,
-        color: type.baseColor,
+        color: type.color,
         type: typeKey,
         meshIndices: { type: typeKey, index: typeCounts[typeKey]++ }
       })
     }
+    console.log('[DEBUG] Particle counts:', typeCounts)
     return { data, counts: typeCounts }
   }, [count])
 
@@ -378,14 +378,7 @@ export const Army = ({ count = 1000 }: { count: number }) => {
     const { data: allParticles } = particles
     if (allParticles.length === 0) return
 
-    // シェーダーの時間更新
-    Object.values(customMaterialsMap).forEach(map => {
-        map.forEach(mat => {
-            if (mat.userData.shader) {
-                mat.userData.shader.uniforms.uTime.value = state.clock.elapsedTime
-            }
-        })
-    })
+    // シェーダーアニメーションは一時的に無効化（色の問題を優先）
 
     // グリッド登録
     grid.clear()
@@ -457,60 +450,50 @@ export const Army = ({ count = 1000 }: { count: number }) => {
     })
 
     Object.values(meshRefs.current).forEach(meshList => {
-      meshList.forEach(mesh => {
-        if (mesh) mesh.instanceMatrix.needsUpdate = true
-      })
+      if (meshList && Array.isArray(meshList)) {
+        meshList.forEach(mesh => {
+          if (mesh) mesh.instanceMatrix.needsUpdate = true
+        })
+      }
     })
   })
 
-  // 6. 描画コンポーネント
+  // 6. 描画コンポーネント（統合ジオメトリで3色描画）
   // ---------------------------------------------------------------------------
   return (
     <>
       {Object.keys(UNIT_TYPES).map((key) => {
         const typeKey = key as keyof typeof UNIT_TYPES
         const typeCount = particles.counts[typeKey]
-        const meshData = bakedDataMap[typeKey] // タイプごとの変形済みメッシュ
-        const matMap = customMaterialsMap[typeKey]
+        const material = typeMaterials[typeKey]
+        const geometry = mergedGeometryMap[typeKey]
         
-        if (typeCount === 0) return null
+        if (typeCount === 0 || !geometry) return null
 
+        console.log(`[RENDER] ${typeKey}: count=${typeCount}, material.color=${material.color.getHexString()}`)
+        
         return (
-          <group key={typeKey}>
-            {meshData.map(({ geometry, key: meshKey }, meshIndex) => {
-              const material = matMap.get(meshKey)
-              
-              return (
-                <instancedMesh
-                  key={`${typeKey}-${meshKey}`}
-                  ref={(el) => {
-                    if (el) {
-                      meshRefs.current[typeKey][meshIndex] = el
-                      
-                      // 初期化
-                      if (el.count > 0) {
-                        const pList = particles.data.filter(p => p.type === typeKey)
-                        pList.forEach(p => {
-                          tempObject.position.copy(p.position)
-                          tempObject.rotation.set(0, p.rotationY, 0)
-                          tempObject.scale.set(p.scale, p.scale, p.scale)
-                          tempObject.updateMatrix()
-                          el.setMatrixAt(p.meshIndices.index, tempObject.matrix)
-                          
-                          tempColor.set(p.color)
-                          el.setColorAt(p.meshIndices.index, tempColor)
-                        })
-                        el.instanceMatrix.needsUpdate = true
-                        if (el.instanceColor) el.instanceColor.needsUpdate = true
-                      }
-                    }
-                  }}
-                  args={[geometry, material, typeCount]}
-                  frustumCulled={false}
-                />
-              )
-            })}
-          </group>
+          <instancedMesh
+            key={typeKey}
+            ref={(el) => {
+              if (el) {
+                meshRefs.current[typeKey][0] = el
+                
+                // 初期化
+                const pList = particles.data.filter(p => p.type === typeKey)
+                pList.forEach(p => {
+                  tempObject.position.copy(p.position)
+                  tempObject.rotation.set(0, p.rotationY, 0)
+                  tempObject.scale.set(p.scale, p.scale, p.scale)
+                  tempObject.updateMatrix()
+                  el.setMatrixAt(p.meshIndices.index, tempObject.matrix)
+                })
+                el.instanceMatrix.needsUpdate = true
+              }
+            }}
+            args={[geometry, material, typeCount]}
+            frustumCulled={false}
+          />
         )
       })}
     </>
