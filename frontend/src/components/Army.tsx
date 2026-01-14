@@ -10,6 +10,9 @@ import { useFrame, useThree } from '@react-three/fiber'
 const tempObject = new THREE.Object3D()
 const tempColor = new THREE.Color()
 
+// パーツごとのスケール定義
+type BoneScales = { [key: string]: [number, number, number] }
+
 // ユニット定義
 const UNIT_TYPES = {
   MELEE: {
@@ -18,6 +21,17 @@ const UNIT_TYPES = {
     scale: 0.6,
     speed: 1.5,
     color: '#ff3333', // 赤
+    // SDガンダム風: 頭デカ、手足デカ、胴体短
+    boneScales: {
+      'Head': [2.5, 2.5, 2.5],
+      'Torso': [0.7, 0.6, 0.7],
+      'UpperArm': [1.3, 1.3, 1.3],
+      'LowerArm': [1.5, 1.5, 1.5],
+      'Hand': [2.0, 2.0, 2.0],
+      'UpperLeg': [0.7, 0.7, 0.7],
+      'LowerLeg': [0.7, 0.7, 0.7],
+      'Foot': [2.0, 1.5, 2.0],
+    } as BoneScales,
     boids: { seperation: 2.0, alignment: 1.0, cohesion: 1.0, maxSpeed: 0.8, maxForce: 0.05, perceptionRadius: 10 }
   },
   TANK: {
@@ -26,6 +40,15 @@ const UNIT_TYPES = {
     scale: 0.9,
     speed: 0.5,
     color: '#0044ff', // 青
+    // マッチョ風: 肩幅広、胴体太、足太
+    boneScales: {
+      'Head': [0.6, 0.6, 0.6],
+      'Torso': [1.8, 1.4, 1.8],
+      'Shoulder': [2.5, 2.5, 2.5],
+      'UpperArm': [1.8, 1.8, 1.8],
+      'UpperLeg': [1.8, 1.5, 1.8],
+      'LowerLeg': [1.8, 1.5, 1.8],
+    } as BoneScales,
     boids: { seperation: 3.0, alignment: 1.0, cohesion: 2.0, maxSpeed: 0.3, maxForce: 0.1, perceptionRadius: 15 }
   },
   SUPPORT: {
@@ -34,6 +57,13 @@ const UNIT_TYPES = {
     scale: 0.4,
     speed: 1.0,
     color: '#ffdd00', // 黄
+    // ちびキャラ風
+    boneScales: {
+      'Head': [1.8, 1.8, 1.8],
+      'Torso': [1.2, 0.8, 1.2],
+      'Arm': [0.7, 0.7, 0.7],
+      'Leg': [0.5, 0.5, 0.5],
+    } as BoneScales,
     boids: { seperation: 4.0, alignment: 0.5, cohesion: 0.5, maxSpeed: 0.6, maxForce: 0.08, perceptionRadius: 20 }
   }
 }
@@ -84,6 +114,115 @@ class SpatialGrid {
 }
 
 // -----------------------------------------------------------------------------
+// ヘルパー: CPUスキニング計算
+// -----------------------------------------------------------------------------
+const bakeSkinnedMesh = (skinnedMesh: THREE.SkinnedMesh, boneScales: BoneScales): THREE.BufferGeometry => {
+  const skeleton = skinnedMesh.skeleton
+  
+  // ボーンスケールの一時適用
+  const originalScales = new Map<THREE.Bone, THREE.Vector3>()
+  skeleton.bones.forEach(bone => {
+    originalScales.set(bone, bone.scale.clone())
+    // scale適用
+    Object.keys(boneScales).forEach(key => {
+      if (bone.name.includes(key)) {
+        const s = boneScales[key]
+        bone.scale.set(s[0], s[1], s[2])
+      }
+    })
+  })
+  
+  // 行列更新
+  skeleton.update()
+
+  const geometry = skinnedMesh.geometry.clone()
+  const positionAttribute = geometry.attributes.position
+  const skinIndexAttribute = geometry.attributes.skinIndex
+  const skinWeightAttribute = geometry.attributes.skinWeight
+
+  if (!positionAttribute || !skinIndexAttribute || !skinWeightAttribute) {
+    // 戻す
+    skeleton.bones.forEach(bone => {
+      const s = originalScales.get(bone)
+      if (s) bone.scale.copy(s)
+    })
+    skeleton.update()
+    return geometry
+  }
+
+  const vertex = new THREE.Vector3()
+  const skinnedVertex = new THREE.Vector3()
+  const boneMatrix = new THREE.Matrix4()
+  const bindMatrix = skinnedMesh.bindMatrix
+  const bindMatrixInverse = skinnedMesh.bindMatrixInverse
+
+  // 頂点計算
+  for (let i = 0; i < positionAttribute.count; i++) {
+    vertex.fromBufferAttribute(positionAttribute, i)
+    skinnedVertex.set(0, 0, 0)
+
+    const skinIndices = [
+      skinIndexAttribute.getX(i),
+      skinIndexAttribute.getY(i),
+      skinIndexAttribute.getZ(i),
+      skinIndexAttribute.getW(i)
+    ]
+    const skinWeights = [
+      skinWeightAttribute.getX(i),
+      skinWeightAttribute.getY(i),
+      skinWeightAttribute.getZ(i),
+      skinWeightAttribute.getW(i)
+    ]
+
+    // ボーン変形計算
+    // v_skinned = sum( weight * BoneMatrix * BoneInverse ) * BindMatrix * v_local
+    for (let j = 0; j < 4; j++) {
+      const weight = skinWeights[j]
+      if (weight === 0) continue
+
+      const boneIndex = skinIndices[j]
+      const bone = skeleton.bones[boneIndex]
+      if (!bone) continue
+
+      const boneInverse = skeleton.boneInverses[boneIndex]
+
+      // boneMatrix = BoneWorld * BoneInverse
+      boneMatrix.multiplyMatrices(bone.matrixWorld, boneInverse)
+      
+      const v = vertex.clone().applyMatrix4(bindMatrix).applyMatrix4(boneMatrix)
+      skinnedVertex.add(v.multiplyScalar(weight))
+    }
+    
+    // BindMatrixInverse でMeshローカル座標系に戻す
+    skinnedVertex.applyMatrix4(bindMatrixInverse)
+    
+    // 最後にMesh自体のWorld行列（親のスケールや位置）を適用して「焼き込む」
+    // これにより、InstancedMeshの原点に対して、本来あるべき位置・サイズになる
+    skinnedVertex.applyMatrix4(skinnedMesh.matrixWorld)
+
+    positionAttribute.setXYZ(i, skinnedVertex.x, skinnedVertex.y, skinnedVertex.z)
+  }
+
+  // スケールを元に戻す
+  skeleton.bones.forEach(bone => {
+    const s = originalScales.get(bone)
+    if (s) bone.scale.copy(s)
+  })
+  skeleton.update()
+
+  // 法線再計算
+  geometry.computeVertexNormals()
+  
+  // 不要属性削除
+  geometry.deleteAttribute('skinIndex')
+  geometry.deleteAttribute('skinWeight')
+  if (geometry.morphAttributes) geometry.morphAttributes = {}
+  if (geometry.attributes.color) geometry.deleteAttribute('color')
+
+  return geometry
+}
+
+// -----------------------------------------------------------------------------
 // メインコンポーネント
 // -----------------------------------------------------------------------------
 export const Army = ({ count = 1000 }: { count: number }) => {
@@ -92,98 +231,99 @@ export const Army = ({ count = 1000 }: { count: number }) => {
 
   // カメラ初期位置設定
   useEffect(() => {
-    camera.position.set(0, 40, 50)
+    // 違いがわかるように少し近く
+    camera.position.set(0, 30, 40)
     camera.lookAt(0, 0, 0)
   }, [camera])
 
-  // 1. モデルデータの抽出と正規化（ワールド座標系への焼き込み）
+  // 1. タイプごとのメッシュデータを生成（ここで頭身変更を焼き込む）
   // ---------------------------------------------------------------------------
-  const meshes = useMemo(() => {
-    const meshData: { geometry: THREE.BufferGeometry; material: THREE.Material; key: string }[] = []
+  const bakedDataMap = useMemo(() => {
+    // シーンの行列を更新しておく
+    scene.updateMatrixWorld(true)
     
-    // シーンをクローンして操作（元のキャッシュを汚さないため）
-    const clonedScene = scene.clone(true)
-    
-    // ワールド行列を更新（これが重要：パーツの相対位置を確定させる）
-    clonedScene.updateMatrixWorld(true)
-    
-    clonedScene.traverse((obj: any) => {
-      if (obj.isMesh) {
-        // ジオメトリを複製
-        const geometry = obj.geometry.clone()
-        
-        // ワールド変換行列をジオメトリに適用（焼き込み）
-        // これにより、InstancedMeshの原点(0,0,0)に対して、
-        // モデル本来のパーツ位置（頭は上、足は下など）が正しく配置される
-        geometry.applyMatrix4(obj.matrixWorld)
-        
-        // 法線の再計算（変形で歪む可能性があるため）
-        geometry.computeVertexNormals()
-        
-        // 不要な属性の削除（InstancedMeshでの描画負荷軽減）
-        geometry.deleteAttribute('skinIndex')
-        geometry.deleteAttribute('skinWeight')
-        if (geometry.morphAttributes) geometry.morphAttributes = {}
-        if (geometry.attributes.color) geometry.deleteAttribute('color') // 頂点カラーは削除し、InstanceColorを使う
+    const dataMap: { [key: string]: { geometry: THREE.BufferGeometry; material: THREE.Material; key: string }[] } = {}
 
-        // マテリアルの調整
-        const material = obj.material.clone()
-        material.skinning = false // スキンニングアニメーションはOFF
-        material.morphTargets = false // モーフターゲットもOFF
-        
-        meshData.push({ geometry, material, key: obj.uuid })
-      }
+    // 各ユニットタイプごとに生成
+    Object.keys(UNIT_TYPES).forEach(typeKey => {
+      const typeConfig = UNIT_TYPES[typeKey as keyof typeof UNIT_TYPES]
+      const boneScales = typeConfig.boneScales
+      const list: { geometry: THREE.BufferGeometry; material: THREE.Material; key: string }[] = []
+
+      // 注意: オリジナルのシーン構造を使って計算する（クローンはしない）
+      // bakeSkinnedMesh 内部で一時的に変形させて、計算後に戻すアプローチをとる
+      
+      scene.traverse((obj: any) => {
+        if (obj.isSkinnedMesh) {
+          // SkinnedMeshの場合はCPUスキニングで変形を焼き込む
+          const geometry = bakeSkinnedMesh(obj, boneScales)
+          
+          const material = obj.material.clone()
+          material.skinning = false
+          material.morphTargets = false
+          
+          list.push({ geometry, material, key: obj.uuid })
+
+        } else if (obj.isMesh) {
+          // 通常Meshの場合は単純なMatrixWorld焼き込み
+          const geometry = obj.geometry.clone()
+          geometry.applyMatrix4(obj.matrixWorld)
+          geometry.computeVertexNormals()
+          
+          if (geometry.attributes.color) geometry.deleteAttribute('color')
+          
+          const material = obj.material.clone()
+          list.push({ geometry, material, key: obj.uuid })
+        }
+      })
+      dataMap[typeKey] = list
     })
-    return meshData
+    
+    return dataMap
   }, [scene])
 
   // 2. シェーダーアニメーションの準備
   // ---------------------------------------------------------------------------
-  const customMaterials = useMemo(() => {
-    const map = new Map<string, THREE.Material>()
+  const customMaterialsMap = useMemo(() => {
+    const typeMatMap: { [typeKey: string]: Map<string, THREE.Material> } = {}
     
-    meshes.forEach(({ material, key }) => {
-      const mat = material.clone()
-      
-      mat.onBeforeCompile = (shader) => {
-        shader.uniforms.uTime = { value: 0 }
-        mat.userData.shader = shader
+    Object.keys(bakedDataMap).forEach(typeKey => {
+        const meshList = bakedDataMap[typeKey]
+        const map = new Map<string, THREE.Material>()
         
-        // 簡易的な歩行アニメーション（頂点シェーダー）
-        shader.vertexShader = `uniform float uTime;\n` + shader.vertexShader
-        shader.vertexShader = shader.vertexShader.replace(
-          '#include <begin_vertex>',
-          `
-            #include <begin_vertex>
-            
-            // 足の判定（Y座標が低い部分）
-            float isLeg = 1.0 - smoothstep(0.5, 2.0, transformed.y); // 高さ調整が必要かも
-            float legSide = sign(transformed.x);
-            
-            // インスタンスごとのランダム値
-            #ifdef USE_INSTANCING
-              float rnd = instanceMatrix[3][0] * 0.1 + instanceMatrix[3][2] * 0.1;
-            #else
-              float rnd = 0.0;
-            #endif
-
-            float speed = 10.0;
-            float walkSignal = sin(uTime * speed + rnd + legSide * 3.14);
-            
-            // 前後(Z)と上下(Y)の動き
-            transformed.z += walkSignal * 0.5 * isLeg;
-            transformed.y += abs(sin(uTime * speed + rnd)) * 0.2 * isLeg;
-          `
-        )
-      }
-      map.set(key, mat)
+        meshList.forEach(({ material, key }) => {
+            const mat = material.clone()
+            mat.onBeforeCompile = (shader) => {
+                shader.uniforms.uTime = { value: 0 }
+                mat.userData.shader = shader
+                shader.vertexShader = `uniform float uTime;\n` + shader.vertexShader
+                shader.vertexShader = shader.vertexShader.replace(
+                '#include <begin_vertex>',
+                `
+                    #include <begin_vertex>
+                    float isLeg = 1.0 - smoothstep(0.5, 2.0, transformed.y);
+                    float legSide = sign(transformed.x);
+                    #ifdef USE_INSTANCING
+                    float rnd = instanceMatrix[3][0] * 0.1 + instanceMatrix[3][2] * 0.1;
+                    #else
+                    float rnd = 0.0;
+                    #endif
+                    float speed = 10.0;
+                    float walkSignal = sin(uTime * speed + rnd + legSide * 3.14);
+                    transformed.z += walkSignal * 0.5 * isLeg;
+                    transformed.y += abs(sin(uTime * speed + rnd)) * 0.2 * isLeg;
+                `
+                )
+            }
+            map.set(key, mat)
+        })
+        typeMatMap[typeKey] = map
     })
-    return map
-  }, [meshes])
+    return typeMatMap
+  }, [bakedDataMap])
 
   // 3. パーティクル（Boidsユニット）の初期化
   // ---------------------------------------------------------------------------
-  // タイプごとに配列を分けず、フラットに管理してインデックスで参照する方式
   type Particle = {
     position: THREE.Vector3
     velocity: THREE.Vector3
@@ -192,12 +332,11 @@ export const Army = ({ count = 1000 }: { count: number }) => {
     scale: number
     color: string
     type: keyof typeof UNIT_TYPES
-    meshIndices: { type: keyof typeof UNIT_TYPES, index: number } // 描画用インデックス
+    meshIndices: { type: keyof typeof UNIT_TYPES, index: number }
   }
 
   const particles = useMemo(() => {
     const data: Particle[] = []
-    // タイプごとのカウンタ（InstancedMeshの何番目か）
     const typeCounts = { MELEE: 0, TANK: 0, SUPPORT: 0 }
 
     for (let i = 0; i < count; i++) {
@@ -208,7 +347,6 @@ export const Army = ({ count = 1000 }: { count: number }) => {
       
       const type = UNIT_TYPES[typeKey]
       
-      // 配置（少し広めに）
       const x = (Math.random() - 0.5) * 200
       const z = (Math.random() - 0.5) * 200
 
@@ -228,7 +366,6 @@ export const Army = ({ count = 1000 }: { count: number }) => {
 
   // 4. InstancedMeshの参照管理
   // ---------------------------------------------------------------------------
-  // meshRefs.current[typeKey][meshIndex] = InstancedMesh
   const meshRefs = useRef<{ [key: string]: THREE.InstancedMesh[] }>({
     MELEE: [], TANK: [], SUPPORT: []
   })
@@ -242,10 +379,12 @@ export const Army = ({ count = 1000 }: { count: number }) => {
     if (allParticles.length === 0) return
 
     // シェーダーの時間更新
-    customMaterials.forEach(mat => {
-      if (mat.userData.shader) {
-        mat.userData.shader.uniforms.uTime.value = state.clock.elapsedTime
-      }
+    Object.values(customMaterialsMap).forEach(map => {
+        map.forEach(mat => {
+            if (mat.userData.shader) {
+                mat.userData.shader.uniforms.uTime.value = state.clock.elapsedTime
+            }
+        })
     })
 
     // グリッド登録
@@ -286,7 +425,7 @@ export const Army = ({ count = 1000 }: { count: number }) => {
       p.acceleration.add(sep.multiplyScalar(typeParams.seperation))
       p.acceleration.add(ali.multiplyScalar(typeParams.alignment))
       p.acceleration.add(coh.multiplyScalar(typeParams.cohesion))
-      p.acceleration.add(p.position.clone().multiplyScalar(-0.005)) // 中央への引力
+      p.acceleration.add(p.position.clone().multiplyScalar(-0.005))
 
       p.velocity.add(p.acceleration).clampLength(0, typeParams.maxSpeed)
       p.position.add(p.velocity)
@@ -297,7 +436,6 @@ export const Army = ({ count = 1000 }: { count: number }) => {
     })
 
     // 行列更新
-    // 全パーティクルを走査して、対応するInstancedMeshの行列を更新する
     allParticles.forEach(p => {
       tempObject.position.copy(p.position)
       tempObject.rotation.set(0, p.rotationY, 0)
@@ -307,7 +445,6 @@ export const Army = ({ count = 1000 }: { count: number }) => {
       const typeKey = p.type
       const index = p.meshIndices.index
       
-      // そのタイプの全メッシュパーツに対して行列をセット
       const targetMeshes = meshRefs.current[typeKey]
       if (targetMeshes) {
         for (let i = 0; i < targetMeshes.length; i++) {
@@ -319,7 +456,6 @@ export const Army = ({ count = 1000 }: { count: number }) => {
       }
     })
 
-    // needsUpdateフラグを立てる
     Object.values(meshRefs.current).forEach(meshList => {
       meshList.forEach(mesh => {
         if (mesh) mesh.instanceMatrix.needsUpdate = true
@@ -334,14 +470,15 @@ export const Army = ({ count = 1000 }: { count: number }) => {
       {Object.keys(UNIT_TYPES).map((key) => {
         const typeKey = key as keyof typeof UNIT_TYPES
         const typeCount = particles.counts[typeKey]
+        const meshData = bakedDataMap[typeKey] // タイプごとの変形済みメッシュ
+        const matMap = customMaterialsMap[typeKey]
         
         if (typeCount === 0) return null
 
         return (
           <group key={typeKey}>
-            {meshes.map(({ geometry, key: meshKey }, meshIndex) => {
-              // マテリアル取得
-              const material = customMaterials.get(meshKey)
+            {meshData.map(({ geometry, key: meshKey }, meshIndex) => {
+              const material = matMap.get(meshKey)
               
               return (
                 <instancedMesh
@@ -350,22 +487,22 @@ export const Army = ({ count = 1000 }: { count: number }) => {
                     if (el) {
                       meshRefs.current[typeKey][meshIndex] = el
                       
-                      // 初期化時の描画保証（これをしないと一瞬消える）
-                      // typeKeyに属するパーティクルを探して初期値をセット
-                      // ※パフォーマンス的には重いが初期化時のみなので許容
-                      const pList = particles.data.filter(p => p.type === typeKey)
-                      pList.forEach(p => {
-                        tempObject.position.copy(p.position)
-                        tempObject.rotation.set(0, p.rotationY, 0)
-                        tempObject.scale.set(p.scale, p.scale, p.scale)
-                        tempObject.updateMatrix()
-                        el.setMatrixAt(p.meshIndices.index, tempObject.matrix)
-                        
-                        tempColor.set(p.color)
-                        el.setColorAt(p.meshIndices.index, tempColor)
-                      })
-                      el.instanceMatrix.needsUpdate = true
-                      if (el.instanceColor) el.instanceColor.needsUpdate = true
+                      // 初期化
+                      if (el.count > 0) {
+                        const pList = particles.data.filter(p => p.type === typeKey)
+                        pList.forEach(p => {
+                          tempObject.position.copy(p.position)
+                          tempObject.rotation.set(0, p.rotationY, 0)
+                          tempObject.scale.set(p.scale, p.scale, p.scale)
+                          tempObject.updateMatrix()
+                          el.setMatrixAt(p.meshIndices.index, tempObject.matrix)
+                          
+                          tempColor.set(p.color)
+                          el.setColorAt(p.meshIndices.index, tempColor)
+                        })
+                        el.instanceMatrix.needsUpdate = true
+                        if (el.instanceColor) el.instanceColor.needsUpdate = true
+                      }
                     }
                   }}
                   args={[geometry, material, typeCount]}
