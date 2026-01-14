@@ -1,5 +1,4 @@
-import { useGLTF } from '@react-three/drei'
-import { useMemo, useLayoutEffect, useRef, useEffect } from 'react'
+import { useMemo, useRef, useEffect } from 'react'
 import * as THREE from 'three'
 import { useFrame, useThree } from '@react-three/fiber'
 import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js'
@@ -9,67 +8,149 @@ import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js'
 // -----------------------------------------------------------------------------
 
 const tempObject = new THREE.Object3D()
-const tempColor = new THREE.Color()
 
-// パーツごとのスケール定義
-type BoneScales = { [key: string]: [number, number, number] }
-
-// ユニット定義
+// ユニット定義（形状パラメータを追加）
 const UNIT_TYPES = {
   MELEE: {
     id: 0,
     ratio: 0.6,
-    scale: 0.6,
+    scale: 1.0,
     speed: 1.5,
     color: '#ff3333', // 赤
     // SDガンダム風: 頭デカ、手足デカ、胴体短
-    boneScales: {
-      'Head': [2.5, 2.5, 2.5],
-      'Torso': [0.7, 0.6, 0.7],
-      'UpperArm': [1.3, 1.3, 1.3],
-      'LowerArm': [1.5, 1.5, 1.5],
-      'Hand': [2.0, 2.0, 2.0],
-      'UpperLeg': [0.7, 0.7, 0.7],
-      'LowerLeg': [0.7, 0.7, 0.7],
-      'Foot': [2.0, 1.5, 2.0],
-    } as BoneScales,
+    shape: {
+      headSize: 0.6,
+      torsoWidth: 0.5,
+      torsoHeight: 0.4,
+      armWidth: 0.15,
+      armLength: 0.5,
+      legWidth: 0.18,
+      legLength: 0.5,
+      shoulderWidth: 0.25,
+    },
     boids: { seperation: 2.0, alignment: 1.0, cohesion: 1.0, maxSpeed: 0.8, maxForce: 0.05, perceptionRadius: 10 }
   },
   TANK: {
     id: 1,
     ratio: 0.2,
-    scale: 0.9,
+    scale: 1.2,
     speed: 0.5,
     color: '#0044ff', // 青
     // マッチョ風: 肩幅広、胴体太、足太
-    boneScales: {
-      'Head': [0.6, 0.6, 0.6],
-      'Torso': [1.8, 1.4, 1.8],
-      'Shoulder': [2.5, 2.5, 2.5],
-      'UpperArm': [1.8, 1.8, 1.8],
-      'UpperLeg': [1.8, 1.5, 1.8],
-      'LowerLeg': [1.8, 1.5, 1.8],
-    } as BoneScales,
+    shape: {
+      headSize: 0.4,
+      torsoWidth: 0.8,
+      torsoHeight: 0.5,
+      armWidth: 0.25,
+      armLength: 0.4,
+      legWidth: 0.3,
+      legLength: 0.4,
+      shoulderWidth: 0.4,
+    },
     boids: { seperation: 3.0, alignment: 1.0, cohesion: 2.0, maxSpeed: 0.3, maxForce: 0.1, perceptionRadius: 15 }
   },
   SUPPORT: {
     id: 2,
     ratio: 0.2,
-    scale: 0.4,
+    scale: 0.8,
     speed: 1.0,
     color: '#ffdd00', // 黄
     // ちびキャラ風: 頭大きく、手足小さく
-    boneScales: {
-      'Head': [2.2, 2.2, 2.2],          // 頭を大きく
-      'Torso': [0.9, 0.6, 0.9],         // 胴体を小さく
-      'Shoulder': [0.6, 0.6, 0.6],      // 肩を小さく
-      'UpperArm': [0.5, 0.5, 0.5],      // 腕を細く
-      'LowerArm': [0.5, 0.5, 0.5],
-      'UpperLeg': [0.4, 0.4, 0.4],      // 脚を細く
-      'LowerLeg': [0.4, 0.4, 0.4],
-    } as BoneScales,
+    shape: {
+      headSize: 0.7,
+      torsoWidth: 0.35,
+      torsoHeight: 0.3,
+      armWidth: 0.1,
+      armLength: 0.35,
+      legWidth: 0.12,
+      legLength: 0.35,
+      shoulderWidth: 0.15,
+    },
     boids: { seperation: 4.0, alignment: 0.5, cohesion: 0.5, maxSpeed: 0.6, maxForce: 0.08, perceptionRadius: 20 }
   }
+}
+
+// -----------------------------------------------------------------------------
+// ローポリロボット生成関数（約400ポリゴン）
+// -----------------------------------------------------------------------------
+function createLowPolyRobot(shape: typeof UNIT_TYPES.MELEE.shape): THREE.BufferGeometry {
+  const geometries: THREE.BufferGeometry[] = []
+  
+  const { headSize, torsoWidth, torsoHeight, armWidth, armLength, legWidth, legLength, shoulderWidth } = shape
+  
+  // 頭（八角形球）: ~96三角形
+  const headGeom = new THREE.SphereGeometry(headSize, 8, 6)
+  headGeom.translate(0, torsoHeight + headSize * 0.8, 0)
+  geometries.push(headGeom)
+  
+  // 胴体（箱）: 12三角形
+  const torsoGeom = new THREE.BoxGeometry(torsoWidth, torsoHeight, torsoWidth * 0.6)
+  torsoGeom.translate(0, torsoHeight * 0.5, 0)
+  geometries.push(torsoGeom)
+  
+  // 肩（箱×2）: 24三角形
+  const shoulderGeomL = new THREE.BoxGeometry(shoulderWidth, shoulderWidth * 0.8, shoulderWidth * 0.8)
+  shoulderGeomL.translate(-(torsoWidth * 0.5 + shoulderWidth * 0.5), torsoHeight * 0.8, 0)
+  geometries.push(shoulderGeomL)
+  
+  const shoulderGeomR = new THREE.BoxGeometry(shoulderWidth, shoulderWidth * 0.8, shoulderWidth * 0.8)
+  shoulderGeomR.translate(torsoWidth * 0.5 + shoulderWidth * 0.5, torsoHeight * 0.8, 0)
+  geometries.push(shoulderGeomR)
+  
+  // 腕（円柱×2）: ~64三角形
+  const armGeomL = new THREE.CylinderGeometry(armWidth, armWidth * 0.8, armLength, 8)
+  armGeomL.translate(-(torsoWidth * 0.5 + shoulderWidth * 0.5), torsoHeight * 0.5 - armLength * 0.3, 0)
+  geometries.push(armGeomL)
+  
+  const armGeomR = new THREE.CylinderGeometry(armWidth, armWidth * 0.8, armLength, 8)
+  armGeomR.translate(torsoWidth * 0.5 + shoulderWidth * 0.5, torsoHeight * 0.5 - armLength * 0.3, 0)
+  geometries.push(armGeomR)
+  
+  // 手（箱×2）: 24三角形
+  const handGeomL = new THREE.BoxGeometry(armWidth * 1.5, armWidth * 1.5, armWidth * 1.5)
+  handGeomL.translate(-(torsoWidth * 0.5 + shoulderWidth * 0.5), torsoHeight * 0.3 - armLength * 0.7, 0)
+  geometries.push(handGeomL)
+  
+  const handGeomR = new THREE.BoxGeometry(armWidth * 1.5, armWidth * 1.5, armWidth * 1.5)
+  handGeomR.translate(torsoWidth * 0.5 + shoulderWidth * 0.5, torsoHeight * 0.3 - armLength * 0.7, 0)
+  geometries.push(handGeomR)
+  
+  // 腰（箱）: 12三角形
+  const hipGeom = new THREE.BoxGeometry(torsoWidth * 0.8, torsoHeight * 0.3, torsoWidth * 0.5)
+  hipGeom.translate(0, -torsoHeight * 0.1, 0)
+  geometries.push(hipGeom)
+  
+  // 脚（円柱×2）: ~64三角形
+  const legGeomL = new THREE.CylinderGeometry(legWidth, legWidth * 0.9, legLength, 8)
+  legGeomL.translate(-torsoWidth * 0.25, -legLength * 0.6, 0)
+  geometries.push(legGeomL)
+  
+  const legGeomR = new THREE.CylinderGeometry(legWidth, legWidth * 0.9, legLength, 8)
+  legGeomR.translate(torsoWidth * 0.25, -legLength * 0.6, 0)
+  geometries.push(legGeomR)
+  
+  // 足（箱×2）: 24三角形
+  const footGeomL = new THREE.BoxGeometry(legWidth * 1.5, legWidth, legWidth * 2)
+  footGeomL.translate(-torsoWidth * 0.25, -legLength - legWidth * 0.3, legWidth * 0.3)
+  geometries.push(footGeomL)
+  
+  const footGeomR = new THREE.BoxGeometry(legWidth * 1.5, legWidth, legWidth * 2)
+  footGeomR.translate(torsoWidth * 0.25, -legLength - legWidth * 0.3, legWidth * 0.3)
+  geometries.push(footGeomR)
+  
+  // バックパック（箱）: 12三角形
+  const backpackGeom = new THREE.BoxGeometry(torsoWidth * 0.6, torsoHeight * 0.5, torsoWidth * 0.3)
+  backpackGeom.translate(0, torsoHeight * 0.6, -torsoWidth * 0.4)
+  geometries.push(backpackGeom)
+  
+  // 全パーツを統合
+  const merged = BufferGeometryUtils.mergeGeometries(geometries, false)
+  
+  // ポリゴン数をログ出力
+  const triangleCount = merged.index ? merged.index.count / 3 : merged.attributes.position.count / 3
+  console.log(`[LowPolyRobot] Created with ${triangleCount} triangles`)
+  
+  return merged
 }
 
 // -----------------------------------------------------------------------------
@@ -118,204 +199,43 @@ class SpatialGrid {
 }
 
 // -----------------------------------------------------------------------------
-// ヘルパー: CPUスキニング計算
-// -----------------------------------------------------------------------------
-const bakeSkinnedMesh = (skinnedMesh: THREE.SkinnedMesh, boneScales: BoneScales): THREE.BufferGeometry => {
-  const skeleton = skinnedMesh.skeleton
-  
-  // ボーンスケールの一時適用
-  const originalScales = new Map<THREE.Bone, THREE.Vector3>()
-  skeleton.bones.forEach(bone => {
-    originalScales.set(bone, bone.scale.clone())
-    // scale適用
-    Object.keys(boneScales).forEach(key => {
-      if (bone.name.includes(key)) {
-        const s = boneScales[key]
-        bone.scale.set(s[0], s[1], s[2])
-      }
-    })
-  })
-  
-  // 行列更新
-  skeleton.update()
-  // ボーンのmatrixWorldを更新（これが重要！）
-  skeleton.bones.forEach(bone => {
-    bone.updateMatrixWorld(true)
-  })
-
-  const geometry = skinnedMesh.geometry.clone()
-  const positionAttribute = geometry.attributes.position
-  const skinIndexAttribute = geometry.attributes.skinIndex
-  const skinWeightAttribute = geometry.attributes.skinWeight
-
-  if (!positionAttribute || !skinIndexAttribute || !skinWeightAttribute) {
-    // 戻す
-    skeleton.bones.forEach(bone => {
-      const s = originalScales.get(bone)
-      if (s) bone.scale.copy(s)
-    })
-    skeleton.update()
-    return geometry
-  }
-
-  const vertex = new THREE.Vector3()
-  const skinnedVertex = new THREE.Vector3()
-  const boneMatrix = new THREE.Matrix4()
-  const bindMatrix = skinnedMesh.bindMatrix
-  const bindMatrixInverse = skinnedMesh.bindMatrixInverse
-
-  // 頂点計算
-  for (let i = 0; i < positionAttribute.count; i++) {
-    vertex.fromBufferAttribute(positionAttribute, i)
-    skinnedVertex.set(0, 0, 0)
-
-    const skinIndices = [
-      skinIndexAttribute.getX(i),
-      skinIndexAttribute.getY(i),
-      skinIndexAttribute.getZ(i),
-      skinIndexAttribute.getW(i)
-    ]
-    const skinWeights = [
-      skinWeightAttribute.getX(i),
-      skinWeightAttribute.getY(i),
-      skinWeightAttribute.getZ(i),
-      skinWeightAttribute.getW(i)
-    ]
-
-    // ボーン変形計算
-    // v_skinned = sum( weight * BoneMatrix * BoneInverse ) * BindMatrix * v_local
-    for (let j = 0; j < 4; j++) {
-      const weight = skinWeights[j]
-      if (weight === 0) continue
-
-      const boneIndex = skinIndices[j]
-      const bone = skeleton.bones[boneIndex]
-      if (!bone) continue
-
-      const boneInverse = skeleton.boneInverses[boneIndex]
-
-      // boneMatrix = BoneWorld * BoneInverse
-      boneMatrix.multiplyMatrices(bone.matrixWorld, boneInverse)
-      
-      const v = vertex.clone().applyMatrix4(bindMatrix).applyMatrix4(boneMatrix)
-      skinnedVertex.add(v.multiplyScalar(weight))
-    }
-    
-    // BindMatrixInverse でMeshローカル座標系に戻す
-    skinnedVertex.applyMatrix4(bindMatrixInverse)
-    
-    // 最後にMesh自体のWorld行列（親のスケールや位置）を適用して「焼き込む」
-    // これにより、InstancedMeshの原点に対して、本来あるべき位置・サイズになる
-    skinnedVertex.applyMatrix4(skinnedMesh.matrixWorld)
-
-    positionAttribute.setXYZ(i, skinnedVertex.x, skinnedVertex.y, skinnedVertex.z)
-  }
-
-  // スケールを元に戻す
-  skeleton.bones.forEach(bone => {
-    const s = originalScales.get(bone)
-    if (s) bone.scale.copy(s)
-  })
-  skeleton.update()
-
-  // 法線再計算
-  geometry.computeVertexNormals()
-  
-  // 不要属性削除
-  geometry.deleteAttribute('skinIndex')
-  geometry.deleteAttribute('skinWeight')
-  if (geometry.morphAttributes) geometry.morphAttributes = {}
-  if (geometry.attributes.color) geometry.deleteAttribute('color')
-
-  return geometry
-}
-
-// -----------------------------------------------------------------------------
 // メインコンポーネント
 // -----------------------------------------------------------------------------
 export const Army = ({ count = 1000 }: { count: number }) => {
-  const { scene } = useGLTF('/models/RobotExpressive.glb') as any
   const { camera } = useThree()
 
   // カメラ初期位置設定
   useEffect(() => {
-    // 違いがわかるように少し近く
     camera.position.set(0, 30, 40)
     camera.lookAt(0, 0, 0)
   }, [camera])
 
-  // 1. タイプごとの統合ジオメトリを生成（パーツを1つにマージ）
+  // 1. タイプごとのローポリジオメトリを生成
   // ---------------------------------------------------------------------------
-  const mergedGeometryMap = useMemo(() => {
-    // シーンの行列を更新しておく
-    scene.updateMatrixWorld(true)
+  const geometryMap = useMemo(() => {
+    const map: { [key: string]: THREE.BufferGeometry } = {}
     
-    // デバッグ: ボーン名を出力
-    let boneNamesLogged = false
-    scene.traverse((obj: any) => {
-      if (!boneNamesLogged && obj.isSkinnedMesh && obj.skeleton) {
-        const boneNames = obj.skeleton.bones.map((b: any) => b.name)
-        console.log('[DEBUG] All bone names:', boneNames.join(', '))
-        boneNamesLogged = true
-      }
-    })
-    
-    const geometryMap: { [key: string]: THREE.BufferGeometry } = {}
-
-    // 各ユニットタイプごとに生成
     Object.keys(UNIT_TYPES).forEach(typeKey => {
       const typeConfig = UNIT_TYPES[typeKey as keyof typeof UNIT_TYPES]
-      const boneScales = typeConfig.boneScales
-      const geometries: THREE.BufferGeometry[] = []
-
-      scene.traverse((obj: any) => {
-        if (obj.isSkinnedMesh) {
-          const geometry = bakeSkinnedMesh(obj, boneScales)
-          // マージ用に属性を正規化
-          if (geometry.attributes.uv) geometry.deleteAttribute('uv')
-          if (geometry.attributes.uv1) geometry.deleteAttribute('uv1')
-          if (geometry.attributes.uv2) geometry.deleteAttribute('uv2')
-          // morphTargetsRelativeを統一
-          geometry.morphTargetsRelative = false
-          if (geometry.morphAttributes) geometry.morphAttributes = {}
-          geometries.push(geometry)
-
-        } else if (obj.isMesh) {
-          const geometry = obj.geometry.clone()
-          geometry.applyMatrix4(obj.matrixWorld)
-          geometry.computeVertexNormals()
-          if (geometry.attributes.color) geometry.deleteAttribute('color')
-          if (geometry.attributes.uv) geometry.deleteAttribute('uv')
-          if (geometry.attributes.uv1) geometry.deleteAttribute('uv1')
-          if (geometry.attributes.uv2) geometry.deleteAttribute('uv2')
-          // morphTargetsRelativeを統一
-          geometry.morphTargetsRelative = false
-          if (geometry.morphAttributes) geometry.morphAttributes = {}
-          geometries.push(geometry)
-        }
-      })
-      
-      // ジオメトリを統合
-      if (geometries.length > 0) {
-        const merged = BufferGeometryUtils.mergeGeometries(geometries, false)
-        if (merged) {
-          geometryMap[typeKey] = merged
-          const triangleCount = merged.index ? merged.index.count / 3 : merged.attributes.position.count / 3
-          console.log(`[Merged ${typeKey}] ${geometries.length} parts merged, ${triangleCount} triangles per unit`)
-        }
-      }
+      const geometry = createLowPolyRobot(typeConfig.shape)
+      map[typeKey] = geometry
+      console.log(`[Geometry ${typeKey}] Created`)
     })
     
-    return geometryMap
-  }, [scene])
+    return map
+  }, [])
 
   // 2. タイプ別のマテリアルを作成
   // ---------------------------------------------------------------------------
   const typeMaterials = useMemo(() => {
-    const materials: { [key: string]: THREE.MeshBasicMaterial } = {}
+    const materials: { [key: string]: THREE.MeshStandardMaterial } = {}
     Object.keys(UNIT_TYPES).forEach(typeKey => {
       const typeColor = UNIT_TYPES[typeKey as keyof typeof UNIT_TYPES].color
-      materials[typeKey] = new THREE.MeshBasicMaterial({ color: typeColor })
+      materials[typeKey] = new THREE.MeshStandardMaterial({ 
+        color: typeColor,
+        roughness: 0.7,
+        metalness: 0.3,
+      })
       console.log(`[Material] Created ${typeKey} material with color: ${typeColor}`)
     })
     return materials
@@ -366,19 +286,17 @@ export const Army = ({ count = 1000 }: { count: number }) => {
 
   // 4. InstancedMeshの参照管理
   // ---------------------------------------------------------------------------
-  const meshRefs = useRef<{ [key: string]: THREE.InstancedMesh[] }>({
-    MELEE: [], TANK: [], SUPPORT: []
+  const meshRefs = useRef<{ [key: string]: THREE.InstancedMesh | null }>({
+    MELEE: null, TANK: null, SUPPORT: null
   })
 
   // 5. ループ処理（Boids計算 & 描画更新）
   // ---------------------------------------------------------------------------
   const grid = useMemo(() => new SpatialGrid(20), [])
 
-  useFrame((state) => {
+  useFrame(() => {
     const { data: allParticles } = particles
     if (allParticles.length === 0) return
-
-    // シェーダーアニメーションは一時的に無効化（色の問題を優先）
 
     // グリッド登録
     grid.clear()
@@ -432,33 +350,22 @@ export const Army = ({ count = 1000 }: { count: number }) => {
     allParticles.forEach(p => {
       tempObject.position.copy(p.position)
       tempObject.rotation.set(0, p.rotationY, 0)
-      tempObject.scale.set(p.scale, p.scale, p.scale)
+      tempObject.scale.setScalar(p.scale)
       tempObject.updateMatrix()
 
-      const typeKey = p.type
-      const index = p.meshIndices.index
-      
-      const targetMeshes = meshRefs.current[typeKey]
-      if (targetMeshes) {
-        for (let i = 0; i < targetMeshes.length; i++) {
-          const mesh = targetMeshes[i]
-          if (mesh) {
-            mesh.setMatrixAt(index, tempObject.matrix)
-          }
-        }
+      const mesh = meshRefs.current[p.type]
+      if (mesh) {
+        mesh.setMatrixAt(p.meshIndices.index, tempObject.matrix)
       }
     })
 
-    Object.values(meshRefs.current).forEach(meshList => {
-      if (meshList && Array.isArray(meshList)) {
-        meshList.forEach(mesh => {
-          if (mesh) mesh.instanceMatrix.needsUpdate = true
-        })
-      }
+    // instanceMatrix更新フラグ
+    Object.values(meshRefs.current).forEach(mesh => {
+      if (mesh) mesh.instanceMatrix.needsUpdate = true
     })
   })
 
-  // 6. 描画コンポーネント（統合ジオメトリで3色描画）
+  // 6. 描画コンポーネント
   // ---------------------------------------------------------------------------
   return (
     <>
@@ -466,25 +373,23 @@ export const Army = ({ count = 1000 }: { count: number }) => {
         const typeKey = key as keyof typeof UNIT_TYPES
         const typeCount = particles.counts[typeKey]
         const material = typeMaterials[typeKey]
-        const geometry = mergedGeometryMap[typeKey]
+        const geometry = geometryMap[typeKey]
         
         if (typeCount === 0 || !geometry) return null
 
-        console.log(`[RENDER] ${typeKey}: count=${typeCount}, material.color=${material.color.getHexString()}`)
-        
         return (
           <instancedMesh
             key={typeKey}
             ref={(el) => {
               if (el) {
-                meshRefs.current[typeKey][0] = el
+                meshRefs.current[typeKey] = el
                 
                 // 初期化
                 const pList = particles.data.filter(p => p.type === typeKey)
                 pList.forEach(p => {
                   tempObject.position.copy(p.position)
                   tempObject.rotation.set(0, p.rotationY, 0)
-                  tempObject.scale.set(p.scale, p.scale, p.scale)
+                  tempObject.scale.setScalar(p.scale)
                   tempObject.updateMatrix()
                   el.setMatrixAt(p.meshIndices.index, tempObject.matrix)
                 })
@@ -493,6 +398,8 @@ export const Army = ({ count = 1000 }: { count: number }) => {
             }}
             args={[geometry, material, typeCount]}
             frustumCulled={false}
+            castShadow
+            receiveShadow
           />
         )
       })}
