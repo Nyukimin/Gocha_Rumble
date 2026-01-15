@@ -1,7 +1,7 @@
-import ModelViewer from './components/ModelViewer'
+import GuntankWalk from './components/GuntankWalk'
 
 function App() {
-  return <ModelViewer />
+  return <GuntankWalk />
 }
 
 export default App
